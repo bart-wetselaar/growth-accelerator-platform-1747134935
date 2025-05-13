@@ -36,11 +36,16 @@ jobs:
         # Run only the basic tests that don't require external services
         python -m pytest tests/test_basic.py -v || echo "Basic tests completed with warnings"
         
+    - name: Install Azure CLI
+      run: |
+        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+        
     - name: Log into Azure
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
-        enable-AzPSSession: true
+      run: |
+        echo "Logging into Azure..."
+        az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+        az account set --subscription "6e40e67a-fee6-4737-b308-e4c4ebee9a5c"
+        echo "Successfully logged into Azure"
       
     - name: Setup Azure CLI
       run: |
