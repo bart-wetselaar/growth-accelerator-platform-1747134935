@@ -40,6 +40,7 @@ jobs:
       uses: azure/login@v1
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
+        enable-AzPSSession: true
       
     - name: Setup Azure CLI
       run: |
@@ -54,8 +55,13 @@ jobs:
         
     - name: Build and push Docker image
       run: |
-        docker build -t ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
-        docker push ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        echo "Building Docker image..."
+        docker build -t ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} . || { echo "Docker build failed"; exit 1; }
+        
+        echo "Pushing Docker image to Azure Container Registry..."
+        docker push ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} || { echo "Docker push failed"; exit 1; }
+        
+        echo "Docker image built and pushed successfully!"
         
     - name: Deploy to Primary Azure Web App
       uses: azure/webapps-deploy@v2
