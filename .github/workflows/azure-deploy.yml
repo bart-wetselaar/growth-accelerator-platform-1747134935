@@ -1,197 +1,117 @@
-name: Deploy to Azure App Service
+name: Deploy to Azure
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
+
+env:
+  AZURE_PRIMARY_WEBAPP_NAME: growthacceleratorapp
+  AZURE_SECONDARY_WEBAPP_NAME: webappgrowthaccelerator
+  AZURE_RESOURCE_GROUP: growth-accelerator-rg
+  PYTHON_VERSION: '3.11'
+  ACR_REGISTRY: growthacceleratoracr
+  IMAGE_NAME: growthaccelerator
+  IMAGE_TAG: ${{ github.sha }}
+  PRIMARY_DOMAIN: app.growthaccelerator.nl
+  SECONDARY_DOMAIN: webapp.growthaccelerator.nl
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        
-    - name: Set up Azure CLI
-      uses: azure/cli@v1
-      with:
-        inlineScript: |
-          echo "Installing Azure CLI extensions..."
-          az extension add --name webapp
+    - name: Checkout code
+      uses: actions/checkout@v2
       
-    - name: Azure login with partner ID
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Run tests
+      run: |
+        pip install pytest
+        pytest
+        
+    - name: Log into Azure
       uses: azure/login@v1
       with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-    
-    - name: Create Azure resources if needed
-      uses: azure/CLI@v1
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+    - name: Setup Azure CLI
+      run: |
+        az account show
+        
+    - name: Log in to Azure Container Registry
+      uses: azure/docker-login@v1
       with:
-        inlineScript: |
-          # Set variables
-          RESOURCE_GROUP="growth-accelerator-rg"
-          LOCATION="westeurope"
-          APP_NAME="growthacceleratorapp"
-          APP_SERVICE_PLAN="${APP_NAME}-plan"
-          PARTNER_ID="${{ secrets.AZURE_CLIENT_ID }}"
-          
-          # Create resource group if it doesn't exist
-          echo "Creating resource group if needed..."
-          az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --tags "partner-id=$PARTNER_ID" || true
-          
-          # Create App Service Plan if it doesn't exist
-          echo "Creating App Service Plan if needed..."
-          az appservice plan show --name "$APP_SERVICE_PLAN" --resource-group "$RESOURCE_GROUP" || \
-          az appservice plan create --name "$APP_SERVICE_PLAN" --resource-group "$RESOURCE_GROUP" \
-            --sku B1 --is-linux --location "$LOCATION" --tags "partner-id=$PARTNER_ID"
-          
-          # Create Web App if it doesn't exist
-          echo "Creating Web App if needed..."
-          az webapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" || \
-          az webapp create --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
-            --plan "$APP_SERVICE_PLAN" --runtime "PYTHON:3.11" --tags "partner-id=$PARTNER_ID"
-          
-          # Create Application Insights if it doesn't exist
-          echo "Creating Application Insights if needed..."
-          az monitor app-insights component create --app "${APP_NAME}-insights" \
-            --resource-group "$RESOURCE_GROUP" --location "$LOCATION" \
-            --application-type web --kind web || true
-    
-    - name: Deploy to Azure Web App
-      id: deploy-to-azure-webapp
+        login-server: ${{ env.ACR_REGISTRY }}.azurecr.io
+        username: ${{ secrets.ACR_USERNAME }}
+        password: ${{ secrets.ACR_PASSWORD }}
+        
+    - name: Build and push Docker image
+      run: |
+        docker build -t ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
+        docker push ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        
+    - name: Deploy to Primary Azure Web App
       uses: azure/webapps-deploy@v2
       with:
-        app-name: 'growthacceleratorapp'
+        app-name: ${{ env.AZURE_PRIMARY_WEBAPP_NAME }}
         slot-name: 'production'
-        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-    
-    - name: Configure App Settings
-      uses: azure/CLI@v1
+        images: ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        
+    - name: Deploy to Secondary Azure Web App
+      uses: azure/webapps-deploy@v2
       with:
-        inlineScript: |
-          # Set variables
-          RESOURCE_GROUP="growth-accelerator-rg"
-          APP_NAME="growthacceleratorapp"
-          INSIGHTS_NAME="${APP_NAME}-insights"
+        app-name: ${{ env.AZURE_SECONDARY_WEBAPP_NAME }}
+        slot-name: 'production'
+        images: ${{ env.ACR_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        
+    - name: Configure Primary Web App settings
+      run: |
+        # Set app settings for primary web app
+        az webapp config appsettings set --name ${{ env.AZURE_PRIMARY_WEBAPP_NAME }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --settings \
+          WORKABLE_API_KEY=${{ secrets.WORKABLE_API_KEY }} \
+          LINKEDIN_CLIENT_ID=${{ secrets.LINKEDIN_CLIENT_ID }} \
+          LINKEDIN_CLIENT_SECRET=${{ secrets.LINKEDIN_CLIENT_SECRET }} \
+          SQUARESPACE_API_KEY=${{ secrets.SQUARESPACE_API_KEY }} \
+          AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }} \
+          AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }} \
+          AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }} \
+          PRIMARY_DOMAIN=${{ env.PRIMARY_DOMAIN }}
           
-          # Get Application Insights instrumentation key
-          INSTRUMENTATION_KEY=$(az monitor app-insights component show \
-            --app "$INSIGHTS_NAME" --resource-group "$RESOURCE_GROUP" \
-            --query instrumentationKey -o tsv)
+    - name: Configure Secondary Web App settings
+      run: |
+        # Set app settings for secondary web app
+        az webapp config appsettings set --name ${{ env.AZURE_SECONDARY_WEBAPP_NAME }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --settings \
+          WORKABLE_API_KEY=${{ secrets.WORKABLE_API_KEY }} \
+          LINKEDIN_CLIENT_ID=${{ secrets.LINKEDIN_CLIENT_ID }} \
+          LINKEDIN_CLIENT_SECRET=${{ secrets.LINKEDIN_CLIENT_SECRET }} \
+          SQUARESPACE_API_KEY=${{ secrets.SQUARESPACE_API_KEY }} \
+          AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }} \
+          AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }} \
+          AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }} \
+          PRIMARY_DOMAIN=${{ env.SECONDARY_DOMAIN }}
           
-          # Configure app settings
-          az webapp config appsettings set --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
-            --settings \
-              AZURE_TENANT_ID="${{ secrets.AZURE_TENANT_ID }}" \
-              AZURE_CLIENT_ID="${{ secrets.AZURE_CLIENT_ID }}" \
-              AZURE_SUBSCRIPTION_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-              WORKABLE_API_KEY="${{ secrets.WORKABLE_API_KEY }}" \
-              LINKEDIN_CLIENT_ID="${{ secrets.LINKEDIN_CLIENT_ID }}" \
-              LINKEDIN_CLIENT_SECRET="${{ secrets.LINKEDIN_CLIENT_SECRET }}" \
-              SQUARESPACE_API_KEY="${{ secrets.SQUARESPACE_API_KEY }}" \
-              WEBSITES_PORT="5000" \
-              SCM_DO_BUILD_DURING_DEPLOYMENT="true" \
-              APPINSIGHTS_INSTRUMENTATIONKEY="$INSTRUMENTATION_KEY" \
-              ApplicationInsightsAgent_EXTENSION_VERSION="~3"
-    
-    - name: Configure Azure Web App settings
-      uses: azure/CLI@v1
-      with:
-        inlineScript: |
-          # Set variables
-          RESOURCE_GROUP="growth-accelerator-rg"
-          APP_NAME="growthacceleratorapp"
-          CUSTOM_DOMAIN="app.growthaccelerator.nl"
-          
-          # Configure web app settings
-          az webapp config set --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
-            --always-on true \
-            --min-tls-version "1.2" \
-            --http20-enabled true \
-            --ftps-state Disabled
-            
-          # Set up health check
-          az webapp config set --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
-            --health-check-path "/api/health"
-            
-          # Configure custom domain binding if it doesn't exist
-          echo "Checking if custom domain is already bound..."
-          DOMAIN_EXISTS=$(az webapp config hostname list --webapp-name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?name=='$CUSTOM_DOMAIN'].name" -o tsv)
-          
-          if [ -z "$DOMAIN_EXISTS" ]; then
-            echo "Adding custom domain: $CUSTOM_DOMAIN"
-            # Add the custom domain to the web app
-            az webapp config hostname add --webapp-name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --hostname "$CUSTOM_DOMAIN"
-            
-            # Create and bind a managed certificate for the custom domain
-            echo "Creating managed certificate for $CUSTOM_DOMAIN"
-            az webapp config ssl create --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
-              --hostname "$CUSTOM_DOMAIN" --only-enable-https
-          else
-            echo "Custom domain $CUSTOM_DOMAIN is already configured."
-          fi
-    
-    - name: Verify deployment
-      uses: azure/CLI@v1
-      with:
-        inlineScript: |
-          echo "Deployment completed. Verifying..."
-          DEFAULT_URL="https://growthacceleratorapp.azurewebsites.net"
-          CUSTOM_URL="https://app.growthaccelerator.nl"
-          
-          # Verify the web app is accessible on default URL
-          echo "Checking if web app is accessible on default URL..."
-          DEFAULT_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$DEFAULT_URL" || echo "Failed")
-          echo "Default URL HTTP code: $DEFAULT_HTTP_CODE"
-          
-          # Check health endpoint on default URL
-          echo "Checking health endpoint on default URL..."
-          DEFAULT_HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$DEFAULT_URL/api/health" || echo "Failed")
-          echo "Default URL health endpoint HTTP code: $DEFAULT_HEALTH_CODE"
-          
-          # Wait a bit for DNS propagation and certificate provisioning
-          echo "Waiting for potential DNS propagation and certificate provisioning..."
-          sleep 30
-          
-          # Verify the web app is accessible on custom domain
-          echo "Checking if web app is accessible on custom domain..."
-          CUSTOM_HTTP_CODE=$(curl -s -k -o /dev/null -w "%{http_code}" "$CUSTOM_URL" || echo "Failed")
-          echo "Custom domain HTTP code: $CUSTOM_HTTP_CODE"
-          
-          # Check health endpoint on custom domain
-          echo "Checking health endpoint on custom domain..."
-          CUSTOM_HEALTH_CODE=$(curl -s -k -o /dev/null -w "%{http_code}" "$CUSTOM_URL/api/health" || echo "Failed")
-          echo "Custom domain health endpoint HTTP code: $CUSTOM_HEALTH_CODE"
-          
-          # Print summary
-          echo ""
-          echo "Deployment verification summary:"
-          if [ "$DEFAULT_HEALTH_CODE" = "200" ]; then
-            echo "✅ Default domain (azurewebsites.net): HEALTHY"
-          else
-            echo "⚠️ Default domain (azurewebsites.net): NOT HEALTHY (code: $DEFAULT_HEALTH_CODE)"
-          fi
-          
-          if [ "$CUSTOM_HEALTH_CODE" = "200" ]; then
-            echo "✅ Custom domain (app.growthaccelerator.nl): HEALTHY"
-          else
-            echo "⚠️ Custom domain (app.growthaccelerator.nl): NOT HEALTHY (code: $CUSTOM_HEALTH_CODE)"
-            echo "  Note: DNS propagation and certificate provisioning may take up to 24 hours."
-          fi
-          
-          echo ""
-          echo "Web app URLs:"
-          echo "- Default URL: $DEFAULT_URL"
-          echo "- Custom domain: $CUSTOM_URL"
+    - name: Verify primary deployment
+      run: |
+        DEPLOYMENT_URL="https://${{ env.AZURE_PRIMARY_WEBAPP_NAME }}.azurewebsites.net/api/health"
+        echo "Checking primary deployment at $DEPLOYMENT_URL"
+        curl -sSf $DEPLOYMENT_URL || echo "Primary deployment verification pending. App may still be starting."
+        
+        CUSTOM_URL="https://${{ env.PRIMARY_DOMAIN }}/api/health"
+        echo "Checking primary custom domain at $CUSTOM_URL"
+        curl -sSf $CUSTOM_URL || echo "Custom domain may not be fully propagated yet."
+        
+    - name: Verify secondary deployment
+      run: |
+        DEPLOYMENT_URL="https://${{ env.AZURE_SECONDARY_WEBAPP_NAME }}.azurewebsites.net/api/health"
+        echo "Checking secondary deployment at $DEPLOYMENT_URL"
+        curl -sSf $DEPLOYMENT_URL || echo "Secondary deployment verification pending. App may still be starting."
+        
+        CUSTOM_URL="https://${{ env.SECONDARY_DOMAIN }}/api/health"
+        echo "Checking secondary custom domain at $CUSTOM_URL"
+        curl -sSf $CUSTOM_URL || echo "Custom domain may not be fully propagated yet."
